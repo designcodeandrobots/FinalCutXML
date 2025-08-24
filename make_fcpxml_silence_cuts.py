@@ -191,13 +191,16 @@ def invert_intervals(intervals: List[Interval], total: float) -> List[Interval]:
         out.append(Interval(prev, total))
     return out
 
-def pad_and_filter(intervals: List[Interval], total: float, pad: float, min_clip: float) -> List[Interval]:
+def pad_and_filter(intervals: List[Interval], total: float, pad: float, min_clip: float,
+                   pad_pre: Optional[float] = None, pad_post: Optional[float] = None) -> List[Interval]:
     if not intervals:
         return []
+    pre = pad if pad_pre is None else pad_pre
+    post = pad if pad_post is None else pad_post
     padded = []
     for iv in intervals:
-        start = max(0.0, iv.start - pad)
-        end   = min(total, iv.end + pad)
+        start = max(0.0, iv.start - pre)
+        end   = min(total, iv.end + post)
         if end > start:
             padded.append(Interval(start, end))
     padded = merge_overlaps(padded)
@@ -357,7 +360,7 @@ def main():
         silences = detect_silences(args.input, noise_db=args.noise, min_silence=args.min_silence,
                                    total_dur=mi.duration, show_progress=not args.no_progress)
         speech = invert_intervals(silences, mi.duration)
-        clips = pad_and_filter(speech, mi.duration, pad=args.pad, min_clip=args.min_clip)
+        clips = pad_and_filter(speech, mi.duration, pad=args.pad, min_clip=args.min_clip, pad_pre=args.pad_pre, pad_post=args.pad_post)
 
     if args.debug and mi.has_audio:
         print("\nНайденные паузы:")
