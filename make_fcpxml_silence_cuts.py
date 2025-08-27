@@ -2,15 +2,21 @@
 """
 make_fcpxml_silence_cuts.py
 
-1) Находит паузы (ffmpeg silencedetect) и собирает таймлайн из отрезков без пауз.
-2) Все тайминги квантуются по границам кадров и сериализуются как рациональные секунды.
-3) Порог шума можно задать вручную (--noise), либо автоматически (--auto-noise).
+• Находит паузы (ffmpeg silencedetect) и собирает таймлайн из отрезков без пауз.
+• Все тайминги квантуются по границам кадров и сериализуются как рациональные секунды.
+• Порог шума можно задать вручную (--noise) или автоматически (--auto-noise).
+• Улучшения:
+  - Асимметричный паддинг (--pad-pre / --pad-post)
+  - Округление границ клипов "наружу" (start=floor, end=ceil) — не съедает хвосты слов.
 
 Зависимости:
   - FFmpeg: ffmpeg, ffprobe в PATH
 
-Пример:
-  python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml --auto-noise
+Пример (1080p30, авто-порог, короткие паузы 0.5с, защита хвостов):
+  python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
+    --auto-noise --min-silence 0.5 \
+    --format-width 1920 --format-height 1080 --format-fps-num 30 --format-fps-den 1 \
+    --pad-pre 0.06 --pad-post 0.16
 """
 from __future__ import annotations
 
@@ -19,11 +25,11 @@ import json
 import re
 import subprocess
 import sys
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Optional
 from urllib.parse import quote
-
 
 # ---------- Utils ----------
 
@@ -58,17 +64,21 @@ def fraction_for_framerate(rate_str: str) -> Tuple[int, int]:
         pass
     return (25, 1)
 
-def frames_from_seconds(t: float, fps_num: int, fps_den: int) -> int:
-    """Округление времени до ближайшего кадра."""
-    return int(round(t * fps_num / fps_den))
+def frames_floor(t: float, fps_num: int, fps_den: int) -> int:
+    """Округлить время вниз до ближайшего кадра (без усечения начала)."""
+    return int(math.floor((t * fps_num / fps_den) + 1e-9))
+
+def frames_ceil(t: float, fps_num: int, fps_den: int) -> int:
+    """Округлить время вверх до ближайшего кадра (не усекать конец)."""
+    return int(math.ceil((t * fps_num / fps_den) - 1e-9))
 
 def seconds_rational_from_frames(frames: int, fps_num: int, fps_den: int) -> Tuple[int, int]:
+    """frames -> (num, den) для записи 'num/dens' секунд."""
     return frames * fps_den, fps_num
 
 def fmt_frames_as_seconds(frames: int, fps_num: int, fps_den: int) -> str:
     num, den = seconds_rational_from_frames(frames, fps_num, fps_den)
     return f"{num}/{den}s"
-
 
 # ---------- Media Info ----------
 
@@ -103,14 +113,12 @@ def get_media_info(path: Path) -> MediaInfo:
     src_url = "file://" + quote(path.resolve().as_posix())
     return MediaInfo(src_url, duration, v_width, v_height, fps_n, fps_d, has_audio)
 
-
 # ---------- Silence Detection ----------
 
 @dataclass
 class Interval:
     start: float
     end: float
-
     @property
     def dur(self) -> float:
         return max(0.0, self.end - self.start)
@@ -131,7 +139,8 @@ def _print_progress(cur: float, total: float, label: str = "Анализ"):
     sys.stdout.write(f"\r{label} [{bar}] {pct*100:5.1f}%")
     sys.stdout.flush()
 
-def detect_silences(path: Path, noise_db: float, min_silence: float, *, total_dur: float = 0.0, show_progress: bool = True) -> List[Interval]:
+def detect_silences(path: Path, noise_db: float, min_silence: float, *,
+                    total_dur: float = 0.0, show_progress: bool = True) -> List[Interval]:
     if not which("ffmpeg"):
         fail("ffmpeg не найден. Установите FFmpeg и убедитесь, что ffmpeg в PATH.")
     filt = f"silencedetect=noise={noise_db}dB:d={min_silence}"
@@ -191,13 +200,15 @@ def invert_intervals(intervals: List[Interval], total: float) -> List[Interval]:
         out.append(Interval(prev, total))
     return out
 
-def pad_and_filter(intervals: List[Interval], total: float, pad: float, min_clip: float,
+def pad_and_filter(intervals: List[Interval], total: float, *,
+                   pad: float, min_clip: float,
                    pad_pre: Optional[float] = None, pad_post: Optional[float] = None) -> List[Interval]:
+    """Асимметричный паддинг: pre — до начала, post — после конца."""
     if not intervals:
         return []
     pre = pad if pad_pre is None else pad_pre
     post = pad if pad_post is None else pad_post
-    padded = []
+    padded: List[Interval] = []
     for iv in intervals:
         start = max(0.0, iv.start - pre)
         end   = min(total, iv.end + post)
@@ -206,20 +217,19 @@ def pad_and_filter(intervals: List[Interval], total: float, pad: float, min_clip
     padded = merge_overlaps(padded)
     return [iv for iv in padded if iv.dur >= min_clip]
 
-
 # ---------- Автооценка шумового пола ----------
 
-def estimate_noise_floor_db(path: Path, sample_dur: float = 30.0, prefilter: bool = False) -> Optional[float]:
+def estimate_noise_floor_db(path: Path, sample_dur: float = 30.0) -> Optional[float]:
+    """Оценить средний уровень (mean_volume) на первом фрагменте sample_dur сек."""
     if not which("ffmpeg"):
         return None
-    # берём кусок
-    cmd = ["ffmpeg", "-hide_banner", "-i", str(path), "-t", str(sample_dur), "-af", "volumedetect", "-f", "null", "-"]
+    cmd = ["ffmpeg", "-hide_banner", "-i", str(path), "-t", str(sample_dur),
+           "-af", "volumedetect", "-f", "null", "-"]
     p = run(cmd)
     m = re.search(r"mean_volume:\s*(-?\d+(\.\d+)?) dB", p.stderr)
     if not m:
         return None
     return float(m.group(1))
-
 
 # ---------- FCPXML ----------
 
@@ -242,16 +252,19 @@ def build_fcpxml(
     timeline_fps_num: int,
     timeline_fps_den: int,
 ) -> str:
+    # Пересчитываем клипы в кадры с округлением наружу
     start_frames: List[int] = []
     dur_frames: List[int] = []
     for c in clips:
-        sf = frames_from_seconds(c.start, timeline_fps_num, timeline_fps_den)
-        df = frames_from_seconds(c.dur,   timeline_fps_num, timeline_fps_den)
+        sf = frames_floor(c.start, timeline_fps_num, timeline_fps_den)
+        ef = frames_ceil(c.end,   timeline_fps_num, timeline_fps_den)
+        df = max(0, ef - sf)
         if df <= 0:
             continue
         start_frames.append(sf)
         dur_frames.append(df)
 
+    # Накопительные offset'ы, в кадрах
     offsets: List[int] = []
     acc = 0
     for df in dur_frames:
@@ -261,7 +274,8 @@ def build_fcpxml(
 
     frame_duration_str = fmt_frames_as_seconds(1, timeline_fps_num, timeline_fps_den)
 
-    spine_items = []
+    # Сборка spine
+    spine_items: List[str] = []
     for i, (sf, of, df) in enumerate(zip(start_frames, offsets, dur_frames), 1):
         spine_items.append(
             f'            <asset-clip name="Segment {i}" ref="r1" '
@@ -271,13 +285,12 @@ def build_fcpxml(
         )
     spine_xml = "\n".join(spine_items) if spine_items else "            <!-- Нет клипов -->"
 
-    asset_duration_frames = frames_from_seconds(mi.duration, timeline_fps_num, timeline_fps_den)
-
+    # Ресурсы и секвенция
+    asset_duration_frames = frames_ceil(mi.duration, timeline_fps_num, timeline_fps_den)
     format_line = (
         f'    <format id="r0" frameDuration="{frame_duration_str}" '
         f'width="{timeline_width}" height="{timeline_height}"/>'
     )
-
     sequence_open = (
         f'        <sequence format="r0" '
         f'duration="{fmt_frames_as_seconds(timeline_frames, timeline_fps_num, timeline_fps_den)}" '
@@ -309,11 +322,10 @@ def build_fcpxml(
 """
     return xml
 
-
 # ---------- CLI ----------
 
 def main():
-    ap = argparse.ArgumentParser(description="FCPXML: разрезка по паузам")
+    ap = argparse.ArgumentParser(description="FCPXML: разрезка по паузам (с анти-усечением)")
     ap.add_argument("input", type=Path, help="Путь к видеофайлу")
     ap.add_argument("-o", "--out", type=Path, default=None, help="Куда сохранять .fcpxml (по умолчанию рядом с видео)")
     ap.add_argument("--name", default=None, help="Имя проекта (по умолчанию — имя файла)")
@@ -326,7 +338,11 @@ def main():
 
     ap.add_argument("--min-silence", type=float, default=0.6, help="Мин. длительность тишины, сек")
     ap.add_argument("--min-clip", type=float, default=0.3, help="Мин. длительность клипа, сек")
-    ap.add_argument("--pad", type=float, default=0.05, help="Паддинг к каждому клипу, сек")
+
+    # Паддинг
+    ap.add_argument("--pad", type=float, default=0.05, help="Базовый паддинг до/после клипа, сек")
+    ap.add_argument("--pad-pre", type=float, default=None, help="Паддинг ДО клипа (перекрывает --pad)")
+    ap.add_argument("--pad-post", type=float, default=None, help="Паддинг ПОСЛЕ клипа (перекрывает --pad)")
 
     ap.add_argument("--debug", action="store_true", help="Печатать найденные паузы/клипы")
     ap.add_argument("--no-progress", action="store_true", help="Отключить прогресс-бар")
@@ -357,10 +373,17 @@ def main():
         clips = [Interval(0.0, mi.duration)]
         silences: List[Interval] = []
     else:
+        # прогон silencedetect
         silences = detect_silences(args.input, noise_db=args.noise, min_silence=args.min_silence,
                                    total_dur=mi.duration, show_progress=not args.no_progress)
+        # тишину -> речь
         speech = invert_intervals(silences, mi.duration)
-        clips = pad_and_filter(speech, mi.duration, pad=args.pad, min_clip=args.min_clip, pad_pre=args.pad_pre, pad_post=args.pad_post)
+        # асимметричный паддинг + фильтр по длительности
+        clips = pad_and_filter(
+            speech, mi.duration,
+            pad=args.pad, min_clip=args.min_clip,
+            pad_pre=args.pad_pre, pad_post=args.pad_post
+        )
 
     if args.debug and mi.has_audio:
         print("\nНайденные паузы:")
@@ -390,7 +413,6 @@ def main():
     out_path = args.out or args.input.with_suffix(".fcpxml")
     out_path.write_text(xml, encoding="utf-8")
     print(f"Готово: {out_path}")
-
 
 if __name__ == "__main__":
     try:
