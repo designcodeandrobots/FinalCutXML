@@ -4,18 +4,18 @@ make_fcpxml_silence_cuts.py
 
 • Находит паузы (ffmpeg silencedetect) и собирает таймлайн из отрезков без пауз.
 • Все тайминги квантуются по границам кадров и сериализуются как рациональные секунды.
-• Порог шума можно задать вручную (--noise) или автоматически (--auto-noise).
-• Улучшения:
-  - Асимметричный паддинг (--pad-pre / --pad-post)
-  - Округление границ клипов "наружу" (start=floor, end=ceil) — не съедает хвосты слов.
+• Порог шума — вручную (--noise) или автоматически (--auto-noise).
+• Защита краёв слов:
+  - Округление наружу: start=floor, end=ceil
+  - Асимметричный паддинг клипов: --pad-pre / --pad-post
+  - Укорачивание тишины перед инверсией: --shrink-silence-pre / --shrink-silence-post
+• (опц.) Предфильтр для детектора: --prefilter "highpass=f=120,lowpass=f=8000"
 
-Зависимости:
-  - FFmpeg: ffmpeg, ffprobe в PATH
-
-Пример (1080p30, авто-порог, короткие паузы 0.5с, защита хвостов):
+Пример (1080p30, короткие паузы 0.5с, защита краёв):
   python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
     --auto-noise --min-silence 0.5 \
     --format-width 1920 --format-height 1080 --format-fps-num 30 --format-fps-den 1 \
+    --shrink-silence-pre 0.04 --shrink-silence-post 0.12 \
     --pad-pre 0.06 --pad-post 0.16
 """
 from __future__ import annotations
@@ -73,7 +73,6 @@ def frames_ceil(t: float, fps_num: int, fps_den: int) -> int:
     return int(math.ceil((t * fps_num / fps_den) - 1e-9))
 
 def seconds_rational_from_frames(frames: int, fps_num: int, fps_den: int) -> Tuple[int, int]:
-    """frames -> (num, den) для записи 'num/dens' секунд."""
     return frames * fps_den, fps_num
 
 def fmt_frames_as_seconds(frames: int, fps_num: int, fps_den: int) -> str:
@@ -140,10 +139,14 @@ def _print_progress(cur: float, total: float, label: str = "Анализ"):
     sys.stdout.flush()
 
 def detect_silences(path: Path, noise_db: float, min_silence: float, *,
-                    total_dur: float = 0.0, show_progress: bool = True) -> List[Interval]:
+                    total_dur: float = 0.0, show_progress: bool = True, prefilter: str = "") -> List[Interval]:
     if not which("ffmpeg"):
         fail("ffmpeg не найден. Установите FFmpeg и убедитесь, что ffmpeg в PATH.")
-    filt = f"silencedetect=noise={noise_db}dB:d={min_silence}"
+    chain = []
+    if prefilter.strip():
+        chain.append(prefilter.strip())
+    chain.append(f"silencedetect=noise={noise_db}dB:d={min_silence}")
+    filt = ",".join(chain)
     cmd = ["ffmpeg", "-hide_banner", "-i", str(path), "-af", filt, "-f", "null", "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
     silences: List[Interval] = []
@@ -185,6 +188,20 @@ def merge_overlaps(intervals: List[Interval]) -> List[Interval]:
             merged.append(Interval(iv.start, iv.end))
     return merged
 
+def shrink_silences(intervals: List[Interval], total: float, *,
+                    shrink_pre: float, shrink_post: float) -> List[Interval]:
+    """Уменьшить каждую тишину: сдвинуть её начало вперёд на shrink_pre и конец назад на shrink_post."""
+    if not intervals:
+        return []
+    out: List[Interval] = []
+    for iv in intervals:
+        s = min(max(0.0, iv.start + max(0.0, shrink_pre)), total)
+        e = min(max(0.0, iv.end   - max(0.0, shrink_post)), total)
+        if e - s > 1e-6:
+            out.append(Interval(s, e))
+        # если тишина "схлопнулась" — просто пропускаем её (т.е. рассматриваем как отсутствие тишины)
+    return merge_overlaps(out)
+
 def invert_intervals(intervals: List[Interval], total: float) -> List[Interval]:
     if total <= 0:
         return []
@@ -220,7 +237,7 @@ def pad_and_filter(intervals: List[Interval], total: float, *,
 # ---------- Автооценка шумового пола ----------
 
 def estimate_noise_floor_db(path: Path, sample_dur: float = 30.0) -> Optional[float]:
-    """Оценить средний уровень (mean_volume) на первом фрагменте sample_dur сек."""
+    """Оценить mean_volume (дБFS) на первых sample_dur сек."""
     if not which("ffmpeg"):
         return None
     cmd = ["ffmpeg", "-hide_banner", "-i", str(path), "-t", str(sample_dur),
@@ -264,7 +281,7 @@ def build_fcpxml(
         start_frames.append(sf)
         dur_frames.append(df)
 
-    # Накопительные offset'ы, в кадрах
+    # Накопительные offset'ы
     offsets: List[int] = []
     acc = 0
     for df in dur_frames:
@@ -325,7 +342,7 @@ def build_fcpxml(
 # ---------- CLI ----------
 
 def main():
-    ap = argparse.ArgumentParser(description="FCPXML: разрезка по паузам (с анти-усечением)")
+    ap = argparse.ArgumentParser(description="FCPXML: разрезка по паузам (с защитой краёв)")
     ap.add_argument("input", type=Path, help="Путь к видеофайлу")
     ap.add_argument("-o", "--out", type=Path, default=None, help="Куда сохранять .fcpxml (по умолчанию рядом с видео)")
     ap.add_argument("--name", default=None, help="Имя проекта (по умолчанию — имя файла)")
@@ -335,14 +352,18 @@ def main():
     ap.add_argument("--auto-noise", dest="auto_noise", action="store_true", help="Автооценка порога тишины")
     ap.add_argument("--auto-noise-margin", dest="auto_noise_margin", type=float, default=5.0,
                     help="Запас (dB), который добавляется к шумовому полу при auto-noise")
-
     ap.add_argument("--min-silence", type=float, default=0.6, help="Мин. длительность тишины, сек")
-    ap.add_argument("--min-clip", type=float, default=0.3, help="Мин. длительность клипа, сек")
 
-    # Паддинг
+    # Предфильтр для детектора (необязательно)
+    ap.add_argument("--prefilter", default="", help="FFmpeg-фильтры перед silencedetect (напр. 'highpass=f=120,lowpass=f=8000')")
+
+    # Постобработка речи
+    ap.add_argument("--min-clip", type=float, default=0.3, help="Мин. длительность клипа, сек")
     ap.add_argument("--pad", type=float, default=0.05, help="Базовый паддинг до/после клипа, сек")
     ap.add_argument("--pad-pre", type=float, default=None, help="Паддинг ДО клипа (перекрывает --pad)")
     ap.add_argument("--pad-post", type=float, default=None, help="Паддинг ПОСЛЕ клипа (перекрывает --pad)")
+    ap.add_argument("--shrink-silence-pre", type=float, default=0.0, help="Укоротить начало каждой тишины на N сек")
+    ap.add_argument("--shrink-silence-post", type=float, default=0.0, help="Укоротить конец каждой тишины на N сек")
 
     ap.add_argument("--debug", action="store_true", help="Печатать найденные паузы/клипы")
     ap.add_argument("--no-progress", action="store_true", help="Отключить прогресс-бар")
@@ -367,18 +388,30 @@ def main():
             args.noise = est + args.auto_noise_margin
             print(f"[auto-noise] шумовой пол ≈ {est:.1f} dBFS → порог тишины --noise {args.noise:.1f} dB")
 
-    # 1) Режем по тишине
+    # 1) Детектим тишины (с возможным предфильтром)
     if not mi.has_audio:
         print("Предупреждение: у файла нет аудио-дорожки. Будет один клип на всю длительность.")
         clips = [Interval(0.0, mi.duration)]
         silences: List[Interval] = []
     else:
-        # прогон silencedetect
-        silences = detect_silences(args.input, noise_db=args.noise, min_silence=args.min_silence,
-                                   total_dur=mi.duration, show_progress=not args.no_progress)
-        # тишину -> речь
+        silences = detect_silences(
+            args.input,
+            noise_db=args.noise,
+            min_silence=args.min_silence,
+            total_dur=mi.duration,
+            show_progress=not args.no_progress,
+            prefilter=args.prefilter
+        )
+
+        # 2) Укорачиваем тишины → расширяем речь
+        silences = shrink_silences(
+            silences, mi.duration,
+            shrink_pre=args.shrink_silence_pre,
+            shrink_post=args.shrink_silence_post
+        )
+
+        # 3) Инвертируем в речь и добавляем паддинг
         speech = invert_intervals(silences, mi.duration)
-        # асимметричный паддинг + фильтр по длительности
         clips = pad_and_filter(
             speech, mi.duration,
             pad=args.pad, min_clip=args.min_clip,
@@ -386,9 +419,9 @@ def main():
         )
 
     if args.debug and mi.has_audio:
-        print("\nНайденные паузы:")
+        print("\nТишины (после shrink):")
         for iv in silences:
-            print(f"  {iv.start:.3f} — {iv.end:.3f} ({iv.dur:.3f}s)")
+            print(f"  S: {iv.start:.3f} — {iv.end:.3f} ({iv.dur:.3f}s)")
         print("\nКлипы:")
         for i, iv in enumerate(clips, 1):
             print(f"  {i:02d}: {iv.start:.3f} — {iv.end:.3f} (dur {iv.dur:.3f}s)")
