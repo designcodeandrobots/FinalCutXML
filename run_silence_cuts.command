@@ -1,5 +1,5 @@
 #!/bin/bash
-cd "20 20 12 61 79 80 81 701 702 33 98 100 204 250 395 398 399 400dirname "-e")"
+cd "$(dirname "$0")"
 
 python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
   --auto-noise --auto-noise-margin 3 \

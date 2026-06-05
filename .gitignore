@@ -2,3 +2,7 @@ cuts.fcpxml
 input.mp4
 input.fcpxml
 migrate.py
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
