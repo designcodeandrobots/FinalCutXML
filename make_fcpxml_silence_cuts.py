@@ -4,7 +4,8 @@ make_fcpxml_silence_cuts.py
 
 * Finds pauses with ffmpeg silencedetect and builds a timeline from non-silent segments.
 * Quantizes all timings to frame boundaries and serializes them as rational seconds.
-* Supports a manual noise threshold (--noise) or automatic threshold detection (--auto-noise).
+* Supports a manual noise threshold (--noise), automatic threshold detection (--auto-noise),
+  or windowed adaptive threshold detection (--adaptive-noise).
 * Protects word edges:
   - Outward rounding: start=floor, end=ceil
   - Asymmetric clip padding: --pad-pre / --pad-post
@@ -157,7 +158,9 @@ def _print_progress(cur: float, total: float, label: str = "Analyze"):
     sys.stdout.flush()
 
 def detect_silences(path: Path, noise_db: float, min_silence: float, *,
-                    total_dur: float = 0.0, show_progress: bool = True, prefilter: str = "") -> List[Interval]:
+                    total_dur: float = 0.0, show_progress: bool = True, prefilter: str = "",
+                    start_time: float = 0.0, duration: Optional[float] = None,
+                    progress_offset: float = 0.0, progress_label: str = "Analyze") -> List[Interval]:
     if not which("ffmpeg"):
         fail("ffmpeg was not found. Install FFmpeg and make sure ffmpeg is in PATH.")
     chain = []
@@ -165,11 +168,18 @@ def detect_silences(path: Path, noise_db: float, min_silence: float, *,
         chain.append(prefilter.strip())
     chain.append(f"silencedetect=noise={noise_db}dB:d={min_silence}")
     filt = ",".join(chain)
-    cmd = ["ffmpeg", "-hide_banner", "-i", str(path), "-af", filt, "-f", "null", "-"]
+    cmd = ["ffmpeg", "-hide_banner"]
+    if start_time > 0:
+        cmd += ["-ss", f"{start_time:.6f}"]
+    cmd += ["-i", str(path)]
+    if duration is not None:
+        cmd += ["-t", f"{duration:.6f}"]
+    cmd += ["-af", filt, "-f", "null", "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
     silences: List[Interval] = []
     current_start: Optional[float] = None
     last_time = 0.0
+    segment_end = start_time + duration if duration is not None else None
     try:
         assert proc.stderr is not None
         for line in proc.stderr:
@@ -177,20 +187,82 @@ def detect_silences(path: Path, noise_db: float, min_silence: float, *,
             if t:
                 last_time = _hms_to_seconds(*t.groups())
                 if show_progress:
-                    _print_progress(last_time, total_dur or last_time)
+                    _print_progress(progress_offset + last_time, total_dur or last_time, progress_label)
             m1 = SILENCE_START_RE.search(line)
             if m1:
-                current_start = float(m1.group(1))
+                current_start = start_time + float(m1.group(1))
+                if segment_end is not None:
+                    current_start = min(max(start_time, current_start), segment_end)
                 continue
             m2 = SILENCE_END_RE.search(line)
             if m2 and current_start is not None:
-                silences.append(Interval(current_start, float(m2.group(1))))
+                silence_end = start_time + float(m2.group(1))
+                if segment_end is not None:
+                    silence_end = min(max(start_time, silence_end), segment_end)
+                if silence_end > current_start:
+                    silences.append(Interval(current_start, silence_end))
                 current_start = None
     finally:
         proc.wait()
+        if current_start is not None and segment_end is not None:
+            silences.append(Interval(current_start, min(segment_end, total_dur or segment_end)))
         if show_progress:
-            _print_progress(total_dur or last_time, total_dur or last_time)
+            done = progress_offset + (duration if duration is not None else last_time)
+            _print_progress(total_dur if duration is None else done, total_dur or last_time, progress_label)
             sys.stdout.write("\n")
+    return merge_overlaps(silences)
+
+def detect_silences_adaptive(path: Path, min_silence: float, *,
+                             total_dur: float,
+                             margin_db: float,
+                             window_dur: float,
+                             sample_dur: float,
+                             probe_count: int,
+                             fallback_noise_db: float,
+                             show_progress: bool = True,
+                             prefilter: str = "") -> List[Interval]:
+    if window_dur <= 0:
+        fail("--adaptive-window must be greater than 0")
+    if sample_dur <= 0:
+        fail("--adaptive-sample must be greater than 0")
+    if probe_count <= 0:
+        fail("--adaptive-probes must be greater than 0")
+
+    silences: List[Interval] = []
+    pos = 0.0
+    window_index = 1
+    while pos < total_dur - 1e-6:
+        dur = min(window_dur, total_dur - pos)
+        est = estimate_window_noise_floor_db(
+            path,
+            window_start=pos,
+            window_dur=dur,
+            sample_dur=sample_dur,
+            probe_count=probe_count,
+            prefilter=prefilter,
+        )
+        noise_db = (est + margin_db) if est is not None else fallback_noise_db
+        if show_progress:
+            print(
+                f"[adaptive-noise] window {window_index}: "
+                f"{pos:.1f}s-{pos + dur:.1f}s, threshold --noise {noise_db:.1f} dB"
+            )
+        silences.extend(
+            detect_silences(
+                path,
+                noise_db=noise_db,
+                min_silence=min_silence,
+                total_dur=total_dur,
+                show_progress=show_progress,
+                prefilter=prefilter,
+                start_time=pos,
+                duration=dur,
+                progress_offset=pos,
+                progress_label="Analyze",
+            )
+        )
+        pos += dur
+        window_index += 1
     return merge_overlaps(silences)
 
 def merge_overlaps(intervals: List[Interval]) -> List[Interval]:
@@ -254,17 +326,51 @@ def pad_and_filter(intervals: List[Interval], total: float, *,
 
 # ---------- Noise floor estimation ----------
 
-def estimate_noise_floor_db(path: Path, sample_dur: float = 30.0) -> Optional[float]:
-    """Estimate mean_volume in dBFS from the first sample_dur seconds."""
+def estimate_noise_floor_db(path: Path, sample_dur: float = 30.0, *,
+                            start_time: float = 0.0, prefilter: str = "") -> Optional[float]:
+    """Estimate mean_volume in dBFS from a sample window."""
     if not which("ffmpeg"):
         return None
-    cmd = ["ffmpeg", "-hide_banner", "-i", str(path), "-t", str(sample_dur),
-           "-af", "volumedetect", "-f", "null", "-"]
+    chain = []
+    if prefilter.strip():
+        chain.append(prefilter.strip())
+    chain.append("volumedetect")
+    cmd = ["ffmpeg", "-hide_banner"]
+    if start_time > 0:
+        cmd += ["-ss", f"{start_time:.6f}"]
+    cmd += ["-i", str(path), "-t", str(sample_dur), "-af", ",".join(chain), "-f", "null", "-"]
     p = run(cmd)
     m = re.search(r"mean_volume:\s*(-?\d+(\.\d+)?) dB", p.stderr)
     if not m:
         return None
     return float(m.group(1))
+
+def estimate_window_noise_floor_db(path: Path, *, window_start: float, window_dur: float,
+                                   sample_dur: float, probe_count: int,
+                                   prefilter: str = "") -> Optional[float]:
+    """Estimate local noise floor by sampling several positions and keeping the quietest probe."""
+    sample = min(sample_dur, window_dur)
+    if sample <= 0:
+        return None
+    if probe_count == 1 or window_dur <= sample:
+        offsets = [0.0]
+    else:
+        step = (window_dur - sample) / (probe_count - 1)
+        offsets = [step * i for i in range(probe_count)]
+
+    estimates: List[float] = []
+    for offset in offsets:
+        est = estimate_noise_floor_db(
+            path,
+            sample_dur=sample,
+            start_time=window_start + offset,
+            prefilter=prefilter,
+        )
+        if est is not None:
+            estimates.append(est)
+    if not estimates:
+        return None
+    return min(estimates)
 
 # ---------- FCPXML ----------
 
@@ -370,6 +476,14 @@ def main():
     ap.add_argument("--auto-noise", dest="auto_noise", action="store_true", help="Estimate the silence threshold automatically")
     ap.add_argument("--auto-noise-margin", dest="auto_noise_margin", type=float, default=5.0,
                     help="Margin in dB added to the estimated noise floor")
+    ap.add_argument("--adaptive-noise", dest="adaptive_noise", action="store_true",
+                    help="Estimate and apply a separate silence threshold for each time window")
+    ap.add_argument("--adaptive-window", type=float, default=300.0,
+                    help="Window duration in seconds for adaptive noise detection")
+    ap.add_argument("--adaptive-sample", type=float, default=20.0,
+                    help="Sample duration in seconds used to estimate each adaptive window")
+    ap.add_argument("--adaptive-probes", type=int, default=3,
+                    help="Number of sample probes per adaptive window; the quietest probe is used")
     ap.add_argument("--min-silence", type=float, default=0.6, help="Minimum silence duration in seconds")
 
     # Optional detector prefilter.
@@ -399,9 +513,9 @@ def main():
 
     mi = get_media_info(args.input)
 
-    # Auto-detect the noise floor.
-    if args.auto_noise and mi.has_audio:
-        est = estimate_noise_floor_db(args.input)
+    # Auto-detect the noise floor for the non-adaptive path.
+    if args.auto_noise and not args.adaptive_noise and mi.has_audio:
+        est = estimate_noise_floor_db(args.input, prefilter=args.prefilter)
         if est is not None:
             args.noise = est + args.auto_noise_margin
             print(f"[auto-noise] noise floor ~= {est:.1f} dBFS -> silence threshold --noise {args.noise:.1f} dB")
@@ -412,14 +526,28 @@ def main():
         clips = [Interval(0.0, mi.duration)]
         silences: List[Interval] = []
     else:
-        silences = detect_silences(
-            args.input,
-            noise_db=args.noise,
-            min_silence=args.min_silence,
-            total_dur=mi.duration,
-            show_progress=not args.no_progress,
-            prefilter=args.prefilter
-        )
+        if args.adaptive_noise:
+            silences = detect_silences_adaptive(
+                args.input,
+                min_silence=args.min_silence,
+                total_dur=mi.duration,
+                margin_db=args.auto_noise_margin,
+                window_dur=args.adaptive_window,
+                sample_dur=args.adaptive_sample,
+                probe_count=args.adaptive_probes,
+                fallback_noise_db=args.noise,
+                show_progress=not args.no_progress,
+                prefilter=args.prefilter
+            )
+        else:
+            silences = detect_silences(
+                args.input,
+                noise_db=args.noise,
+                min_silence=args.min_silence,
+                total_dur=mi.duration,
+                show_progress=not args.no_progress,
+                prefilter=args.prefilter
+            )
 
         # 2) Shrink silences to expand speech regions.
         silences = shrink_silences(
