@@ -65,8 +65,10 @@ python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
   --adaptive-noise \
   --adaptive-window 300 \
   --adaptive-sample 20 \
-  --adaptive-probes 3 \
-  --auto-noise-margin 3 \
+  --adaptive-probes 7 \
+  --adaptive-quantile 0.35 \
+  --adaptive-max-noise -35 \
+  --auto-noise-margin 6 \
   --min-silence 0.2 \
   --pad-pre 0.25 \
   --pad-post 0.25
@@ -80,7 +82,10 @@ python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
 - `--adaptive-noise`: Estimate a separate threshold for each time window.
 - `--adaptive-window`: Window duration in seconds for adaptive threshold detection.
 - `--adaptive-sample`: Length of each probe sample inside an adaptive window.
-- `--adaptive-probes`: Number of probe samples per window. The quietest probe is used as the local noise floor.
+- `--adaptive-probes`: Number of probe samples per window.
+- `--adaptive-quantile`: Probe percentile used as the local noise floor. A value around `0.35` ignores isolated digital silence while still avoiding speech-heavy probes.
+- `--adaptive-min-noise`: Lower clamp for adaptive silence thresholds in dB.
+- `--adaptive-max-noise`: Upper clamp for adaptive silence thresholds in dB.
 - `--min-silence`: Minimum silence duration in seconds.
 - `--min-clip`: Minimum generated clip duration in seconds.
 - `--pad`: Base padding before and after each generated clip.

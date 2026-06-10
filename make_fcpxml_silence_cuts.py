@@ -45,6 +45,24 @@ def fail(msg: str, code: int = 1):
     print(f"Error: {msg}", file=sys.stderr)
     sys.exit(code)
 
+def clamp(value: float, lo: float, hi: float) -> float:
+    return min(max(value, lo), hi)
+
+def percentile(values: List[float], q: float) -> float:
+    if not values:
+        raise ValueError("percentile() requires at least one value")
+    q = clamp(q, 0.0, 1.0)
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = q * (len(ordered) - 1)
+    lower = int(math.floor(pos))
+    upper = int(math.ceil(pos))
+    if lower == upper:
+        return ordered[lower]
+    weight = pos - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
 def fraction_for_framerate(rate_str: str) -> Tuple[int, int]:
     """ffprobe avg/r_frame_rate -> (num, den)"""
     if not rate_str:
@@ -218,6 +236,9 @@ def detect_silences_adaptive(path: Path, min_silence: float, *,
                              window_dur: float,
                              sample_dur: float,
                              probe_count: int,
+                             probe_quantile: float,
+                             min_noise_db: float,
+                             max_noise_db: float,
                              fallback_noise_db: float,
                              show_progress: bool = True,
                              prefilter: str = "") -> List[Interval]:
@@ -239,9 +260,11 @@ def detect_silences_adaptive(path: Path, min_silence: float, *,
             window_dur=dur,
             sample_dur=sample_dur,
             probe_count=probe_count,
+            probe_quantile=probe_quantile,
             prefilter=prefilter,
         )
         noise_db = (est + margin_db) if est is not None else fallback_noise_db
+        noise_db = clamp(noise_db, min_noise_db, max_noise_db)
         if show_progress:
             print(
                 f"[adaptive-noise] window {window_index}: "
@@ -347,8 +370,9 @@ def estimate_noise_floor_db(path: Path, sample_dur: float = 30.0, *,
 
 def estimate_window_noise_floor_db(path: Path, *, window_start: float, window_dur: float,
                                    sample_dur: float, probe_count: int,
+                                   probe_quantile: float,
                                    prefilter: str = "") -> Optional[float]:
-    """Estimate local noise floor by sampling several positions and keeping the quietest probe."""
+    """Estimate local noise floor by sampling several positions and taking a low percentile."""
     sample = min(sample_dur, window_dur)
     if sample <= 0:
         return None
@@ -370,7 +394,7 @@ def estimate_window_noise_floor_db(path: Path, *, window_start: float, window_du
             estimates.append(est)
     if not estimates:
         return None
-    return min(estimates)
+    return percentile(estimates, probe_quantile)
 
 # ---------- FCPXML ----------
 
@@ -482,8 +506,14 @@ def main():
                     help="Window duration in seconds for adaptive noise detection")
     ap.add_argument("--adaptive-sample", type=float, default=20.0,
                     help="Sample duration in seconds used to estimate each adaptive window")
-    ap.add_argument("--adaptive-probes", type=int, default=3,
-                    help="Number of sample probes per adaptive window; the quietest probe is used")
+    ap.add_argument("--adaptive-probes", type=int, default=7,
+                    help="Number of sample probes per adaptive window")
+    ap.add_argument("--adaptive-quantile", type=float, default=0.35,
+                    help="Probe percentile used as local noise floor; 0 is quietest, 1 is loudest")
+    ap.add_argument("--adaptive-min-noise", type=float, default=-80.0,
+                    help="Lower clamp for adaptive silence thresholds in dB")
+    ap.add_argument("--adaptive-max-noise", type=float, default=-35.0,
+                    help="Upper clamp for adaptive silence thresholds in dB")
     ap.add_argument("--min-silence", type=float, default=0.6, help="Minimum silence duration in seconds")
 
     # Optional detector prefilter.
@@ -535,6 +565,9 @@ def main():
                 window_dur=args.adaptive_window,
                 sample_dur=args.adaptive_sample,
                 probe_count=args.adaptive_probes,
+                probe_quantile=args.adaptive_quantile,
+                min_noise_db=args.adaptive_min_noise,
+                max_noise_db=args.adaptive_max_noise,
                 fallback_noise_db=args.noise,
                 show_progress=not args.no_progress,
                 prefilter=args.prefilter
