@@ -141,3 +141,7 @@ python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
 The generated FCPXML references the original media file by absolute `file://` URL. Keep the source video in place when importing into Final Cut Pro, or relink the media after import.
 
 Generated media and XML outputs are ignored by git by default.
+
+## Roadmap
+
+In the next version, I want to add a local LLM model that transcribes the video into text. The goal is to detect and remove failed duplicate takes automatically, not only cut silent pauses. This may become a separate repository.
