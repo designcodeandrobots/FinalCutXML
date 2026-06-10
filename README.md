@@ -56,6 +56,16 @@ Select the generated `cuts.fcpxml` file.
 
 Final Cut Pro creates a new event and a cut project with the detected pauses removed.
 
+## Editing Result
+
+For example, an 83-minute source recording becomes a 65-minute Final Cut project after silence removal. About 18 minutes of pauses are already cut out, and repeated takes are split into separate clips.
+
+![Source video duration before silence removal](docs/images/source-video-duration.png)
+
+![Final Cut project duration after silence removal](docs/images/cut-project-duration.png)
+
+From there, editing is much faster: instead of manually trimming pauses throughout the whole video, you can review the prepared segments, select failed takes, and delete them with a single keypress.
+
 ## Recommended Settings
 
 For a 1080p30 timeline with short pauses and protected word edges:
