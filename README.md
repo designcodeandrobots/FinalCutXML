@@ -38,6 +38,12 @@ python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
 
 Then import `cuts.fcpxml` into Final Cut Pro.
 
+## What You See After Running
+
+During processing, the script prints adaptive-noise windows, the local silence threshold for each window, and an overall progress bar. When processing finishes, it writes `cuts.fcpxml`.
+
+![Terminal output showing adaptive silence detection progress](docs/images/terminal-run.png)
+
 ## Recommended Settings
 
 For a 1080p30 timeline with short pauses and protected word edges:
