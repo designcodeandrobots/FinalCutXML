@@ -2,7 +2,12 @@
 cd "$(dirname "$0")"
 
 python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
-  --auto-noise --auto-noise-margin 3 \
+  --adaptive-noise --auto-noise-margin 6 \
+  --adaptive-window 300 \
+  --adaptive-sample 20 \
+  --adaptive-probes 7 \
+  --adaptive-quantile 0.35 \
+  --adaptive-max-noise -35 \
   --min-silence 0.2 \
   --shrink-silence-pre 0 \
   --shrink-silence-post 0 \

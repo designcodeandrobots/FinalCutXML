@@ -8,6 +8,7 @@ The script uses FFmpeg's `silencedetect` filter to find pauses, converts the rem
 
 - Detects silence with FFmpeg.
 - Supports automatic noise threshold estimation.
+- Supports adaptive per-window noise thresholds for recordings where background noise changes over time.
 - Quantizes all clip boundaries to timeline frames.
 - Adds configurable padding before and after speech regions.
 - Shrinks detected silence before inversion to protect word edges.
@@ -29,7 +30,7 @@ brew install ffmpeg
 
 ```bash
 python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
-  --auto-noise \
+  --adaptive-noise \
   --min-silence 0.5 \
   --pad-pre 0.06 \
   --pad-post 0.16
@@ -57,11 +58,34 @@ python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
   --prefilter "highpass=f=50"
 ```
 
+For recordings where the background noise changes during the video, use adaptive noise detection. This is useful when a fan, air conditioner, or computer cooler is audible for part of the recording and then disappears:
+
+```bash
+python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
+  --adaptive-noise \
+  --adaptive-window 300 \
+  --adaptive-sample 20 \
+  --adaptive-probes 7 \
+  --adaptive-quantile 0.35 \
+  --adaptive-max-noise -35 \
+  --auto-noise-margin 6 \
+  --min-silence 0.2 \
+  --pad-pre 0.25 \
+  --pad-post 0.25
+```
+
 ## Options
 
 - `--noise`: Manual silence threshold in dBFS.
-- `--auto-noise`: Estimate the threshold from the beginning of the file.
+- `--auto-noise`: Estimate one threshold for the whole file.
 - `--auto-noise-margin`: Margin added to the estimated noise floor.
+- `--adaptive-noise`: Estimate a separate threshold for each time window.
+- `--adaptive-window`: Window duration in seconds for adaptive threshold detection.
+- `--adaptive-sample`: Length of each probe sample inside an adaptive window.
+- `--adaptive-probes`: Number of probe samples per window.
+- `--adaptive-quantile`: Probe percentile used as the local noise floor. A value around `0.35` ignores isolated digital silence while still avoiding speech-heavy probes.
+- `--adaptive-min-noise`: Lower clamp for adaptive silence thresholds in dB.
+- `--adaptive-max-noise`: Upper clamp for adaptive silence thresholds in dB.
 - `--min-silence`: Minimum silence duration in seconds.
 - `--min-clip`: Minimum generated clip duration in seconds.
 - `--pad`: Base padding before and after each generated clip.
