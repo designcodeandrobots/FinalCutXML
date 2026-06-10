@@ -44,6 +44,18 @@ During processing, the script prints adaptive-noise windows, the local silence t
 
 ![Terminal output showing adaptive silence detection progress](docs/images/terminal-run.png)
 
+## Import Into Final Cut Pro
+
+In Final Cut Pro, choose `File -> Import -> XML...`.
+
+![Final Cut Pro menu showing File, Import, XML](docs/images/final-cut-import-xml.png)
+
+Select the generated `cuts.fcpxml` file.
+
+![Finder selection showing cuts.fcpxml](docs/images/select-cuts-fcpxml.png)
+
+Final Cut Pro creates a new event and a cut project with the detected pauses removed.
+
 ## Recommended Settings
 
 For a 1080p30 timeline with short pauses and protected word edges:
