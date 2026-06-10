@@ -1,8 +1,20 @@
 # FinalCutXML Silence Cuts
 
-Generate a Final Cut Pro XML timeline that removes silent sections from a video.
+Automatically cut silent pauses from long talking-head, course, tutorial, or screen-recording videos before you start editing in Final Cut Pro.
+
+The script analyzes your video, detects pauses, and generates a `cuts.fcpxml` file. After importing that XML into Final Cut Pro, you get a new event and a ready-made project where the pauses are already removed and the remaining takes are split into editable clips.
+
+This saves a lot of routine editing time. Instead of manually trimming silence across the whole timeline, you can jump straight to reviewing the prepared segments, selecting bad takes, and deleting them with one keypress. In one real example, an 83-minute recording became a 65-minute Final Cut project, with about 18 minutes of pauses removed automatically.
 
 The script uses FFmpeg's `silencedetect` filter to find pauses, converts the remaining speech regions into frame-aligned FCPXML clips, and writes a timeline that can be imported into Final Cut Pro.
+
+## Why It Helps
+
+- Removes silence before the manual editing stage.
+- Turns long recordings into a pre-cut Final Cut Pro project.
+- Keeps repeated takes separated so failed takes are easy to delete.
+- Helps with recordings where the background noise changes over time, such as fan or computer cooler noise.
+- Reduces repetitive timeline trimming and speeds up the first rough cut.
 
 ## Features
 
