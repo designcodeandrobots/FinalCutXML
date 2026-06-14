@@ -107,6 +107,7 @@ python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
   --adaptive-sample 20 \
   --adaptive-probes 7 \
   --adaptive-quantile 0.35 \
+  --adaptive-min-noise -45 \
   --adaptive-max-noise -35 \
   --auto-noise-margin 6 \
   --min-silence 0.2 \
@@ -124,7 +125,7 @@ python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
 - `--adaptive-sample`: Length of each probe sample inside an adaptive window.
 - `--adaptive-probes`: Number of probe samples per window.
 - `--adaptive-quantile`: Probe percentile used as the local noise floor. A value around `0.35` ignores isolated digital silence while still avoiding speech-heavy probes.
-- `--adaptive-min-noise`: Lower clamp for adaptive silence thresholds in dB.
+- `--adaptive-min-noise`: Lower clamp for adaptive silence thresholds in dB. Raise it when quiet noise is kept as speech.
 - `--adaptive-max-noise`: Upper clamp for adaptive silence thresholds in dB.
 - `--min-silence`: Minimum silence duration in seconds.
 - `--min-clip`: Minimum generated clip duration in seconds.

@@ -510,7 +510,7 @@ def main():
                     help="Number of sample probes per adaptive window")
     ap.add_argument("--adaptive-quantile", type=float, default=0.35,
                     help="Probe percentile used as local noise floor; 0 is quietest, 1 is loudest")
-    ap.add_argument("--adaptive-min-noise", type=float, default=-80.0,
+    ap.add_argument("--adaptive-min-noise", type=float, default=-45.0,
                     help="Lower clamp for adaptive silence thresholds in dB")
     ap.add_argument("--adaptive-max-noise", type=float, default=-35.0,
                     help="Upper clamp for adaptive silence thresholds in dB")

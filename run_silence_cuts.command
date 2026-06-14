@@ -7,6 +7,7 @@ python3 make_fcpxml_silence_cuts.py input.mp4 -o cuts.fcpxml \
   --adaptive-sample 20 \
   --adaptive-probes 7 \
   --adaptive-quantile 0.35 \
+  --adaptive-min-noise -45 \
   --adaptive-max-noise -35 \
   --min-silence 0.2 \
   --shrink-silence-pre 0 \
